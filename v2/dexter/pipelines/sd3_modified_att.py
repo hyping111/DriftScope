@@ -1,0 +1,841 @@
+from typing import Any, Callable, Dict, List, Optional, Union
+
+import torch
+
+from diffusers.callbacks import MultiPipelineCallbacks, PipelineCallback
+from diffusers.image_processor import PipelineImageInput, VaeImageProcessor
+from diffusers.utils import (
+    USE_PEFT_BACKEND,
+    is_torch_xla_available,
+    logging,
+    # replace_example_docstring,
+    # scale_lora_layers,
+    # unscale_lora_layers,
+)
+
+from diffusers.pipelines.stable_diffusion_3.pipeline_output import StableDiffusion3PipelineOutput
+from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import calculate_shift, retrieve_timesteps
+
+
+import torch.nn as nn
+
+
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+
+    XLA_AVAILABLE = True
+else:
+    XLA_AVAILABLE = False
+
+
+logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+EXAMPLE_DOC_STRING = """
+    Examples:
+        ```py
+        >>> import torch
+        >>> from diffusers import StableDiffusion3Pipeline
+
+        >>> pipe = StableDiffusion3Pipeline.from_pretrained(
+        ...     "stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=torch.float16
+        ... )
+        >>> pipe.to("cuda")
+        >>> prompt = "A cat holding a sign that says hello world"
+        >>> image = pipe(prompt).images[0]
+        >>> image.save("sd3.png")
+        ```
+"""
+#new
+class AdaLayerNorm(nn.Module):
+    """
+    Norm layer adaptive layer norm zero (adaLN-Zero).
+
+    Parameters:
+        embedding_dim (`int`): The size of each embedding vector.
+        num_embeddings (`int`): The size of the embeddings dictionary.
+    """
+
+    def __init__(self, embedding_dim: int, time_embedding_dim=None, mode='normal'):
+        super().__init__()
+
+        self.silu = nn.SiLU()
+        num_params_dict = dict(
+            zero=6,
+            normal=2,
+        )
+        num_params = num_params_dict[mode]
+        self.linear = nn.Linear(time_embedding_dim or embedding_dim, num_params * embedding_dim, bias=True)
+        self.norm = nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
+        self.mode = mode
+
+    def forward(
+        self,
+        x,
+        hidden_dtype = None,
+        emb = None,
+    ):
+        emb = self.linear(self.silu(emb))
+        if self.mode == 'normal':
+            shift_msa, scale_msa = emb.chunk(2, dim=1)
+            x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
+            return x
+
+        elif self.mode == 'zero':
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = emb.chunk(6, dim=1)
+            x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
+            return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
+
+
+#
+import torch.nn.functional as F
+from einops import rearrange, reduce,repeat
+from diffusers.models.normalization import RMSNorm
+from diffusers.models.attention_processor import AttnProcessor2_0 as AttnProcessor
+
+class JointAttnProcessor(torch.nn.Module):
+    """Attention processor used typically in processing the SD3-like self-attention projections."""
+
+    def __init__(self):
+        super().__init__()
+        if not hasattr(F, "scaled_dot_product_attention"):
+            raise ImportError("AttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
+
+    def __call__(
+        self,
+        attn,
+        hidden_states: torch.FloatTensor,
+        encoder_hidden_states: torch.FloatTensor = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        emb_dict=None,
+        *args,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        residual = hidden_states
+
+        batch_size = hidden_states.shape[0]
+
+        # `sample` projections.
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        # `context` projections.
+        if encoder_hidden_states is not None:
+            encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
+            encoder_hidden_states_key_proj = attn.add_k_proj(encoder_hidden_states)
+            encoder_hidden_states_value_proj = attn.add_v_proj(encoder_hidden_states)
+
+            encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
+                batch_size, -1, attn.heads, head_dim
+            ).transpose(1, 2)
+            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
+                batch_size, -1, attn.heads, head_dim
+            ).transpose(1, 2)
+            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
+                batch_size, -1, attn.heads, head_dim
+            ).transpose(1, 2)
+
+            if attn.norm_added_q is not None:
+                encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
+            if attn.norm_added_k is not None:
+                encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
+
+            query = torch.cat([query, encoder_hidden_states_query_proj], dim=2)
+            key = torch.cat([key, encoder_hidden_states_key_proj], dim=2)
+            value = torch.cat([value, encoder_hidden_states_value_proj], dim=2)
+
+        hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+        hidden_states = hidden_states.to(query.dtype)
+
+        if encoder_hidden_states is not None:
+            # Split the attention outputs.
+            hidden_states, encoder_hidden_states = (
+                hidden_states[:, : residual.shape[1]],
+                hidden_states[:, residual.shape[1] :],
+            )
+            if not attn.context_pre_only:
+                encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if encoder_hidden_states is not None:
+            return hidden_states, encoder_hidden_states
+        else:
+            return hidden_states
+
+
+#
+class JointIPAttnProcessor(torch.nn.Module):
+    """Attention processor used typically in processing the SD3-like self-attention projections."""
+
+    def __init__(
+        self,
+        hidden_size=None,
+        cross_attention_dim=None,
+        ip_hidden_states_dim=None,
+        ip_encoder_hidden_states_dim=None,
+        head_dim=None,
+        timesteps_emb_dim=1280,
+    ):
+        super().__init__()
+
+        self.norm_ip = AdaLayerNorm(ip_hidden_states_dim, time_embedding_dim=timesteps_emb_dim)
+        self.to_k_ip = nn.Linear(ip_hidden_states_dim, hidden_size, bias=False)
+        self.to_v_ip = nn.Linear(ip_hidden_states_dim, hidden_size, bias=False)
+        self.norm_q = RMSNorm(head_dim, 1e-6)
+        self.norm_k = RMSNorm(head_dim, 1e-6)
+        self.norm_ip_k = RMSNorm(head_dim, 1e-6)
+
+
+    def __call__(
+        self,
+        attn,
+        hidden_states: torch.FloatTensor,
+        encoder_hidden_states: torch.FloatTensor = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        emb_dict=None,
+        *args,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        kwargs = kwargs['kwargs']#['custom_kwargs']
+        residual = hidden_states
+
+        batch_size = hidden_states.shape[0]
+
+        # `sample` projections.
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
+        img_query = query
+        img_key = key
+        img_value = value
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn.heads
+
+        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
+
+        # `context` projections.
+        if encoder_hidden_states is not None:
+            encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
+            encoder_hidden_states_key_proj = attn.add_k_proj(encoder_hidden_states)
+            encoder_hidden_states_value_proj = attn.add_v_proj(encoder_hidden_states)
+
+            encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
+                batch_size, -1, attn.heads, head_dim
+            ).transpose(1, 2)
+            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
+                batch_size, -1, attn.heads, head_dim
+            ).transpose(1, 2)
+            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
+                batch_size, -1, attn.heads, head_dim
+            ).transpose(1, 2)
+
+            if attn.norm_added_q is not None:
+                encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
+            if attn.norm_added_k is not None:
+                encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
+
+            #if 'key_buffer' in kwargs['kwargs']:
+            #    kwargs['kwargs']['key_buffer'].append(encoder_hidden_states_key_proj)
+
+            query = torch.cat([query, encoder_hidden_states_query_proj], dim=2)  # [2, 38, 1024, 64] + [2, 38, 333, 64]
+            key = torch.cat([key, encoder_hidden_states_key_proj], dim=2)
+            value = torch.cat([value, encoder_hidden_states_value_proj], dim=2)
+
+        # qkv shape [2, 38, 1357, 64] [B, heads, H*W, head_dim]. attn.heads=38, head_dim=64
+        hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)  # [2, 38, 1357, 64]
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)  # [2, 1357, 2432]
+        hidden_states = hidden_states.to(query.dtype)
+
+        # Compute attention map for logging and mask
+        enable_grad = False# kwargs['kwargs']['enable_grad'] if 'enable_grad' in kwargs['kwargs'] else False
+        with torch.set_grad_enabled(enable_grad):
+            attn_map = attn.get_attention_scores(query.reshape(-1, query.shape[2], query.shape[3]), key.reshape(-1, key.shape[2], key.shape[3]), attention_mask)
+            image_length = query.shape[2] - encoder_hidden_states_query_proj.shape[2]
+            attn_map = attn_map[:, :image_length, image_length:]
+
+        if 'attn_map_buffer' in kwargs:
+            kwargs['attn_map_buffer'].append(attn_map.cpu())  # [(b cond heads) (h w) tokens]
+
+        # TODO put actual batch size
+        #ip_mask = self.compute_ip_mask(attn_map, token_idx=kwargs['kwargs']['selected_prompt_token_idx'], perc=kwargs['kwargs']['cutoff_perc'], batch_size=1)
+
+        #if 'kwargs' in kwargs and 'ip_mask_buffer' in kwargs['kwargs']:
+        #    kwargs['kwargs']['ip_mask_buffer'].append(ip_mask)
+
+        if encoder_hidden_states is not None:
+            # Split the attention outputs.
+            hidden_states, encoder_hidden_states = (
+                hidden_states[:, : residual.shape[1]],
+                hidden_states[:, residual.shape[1] :],
+            )
+            if not attn.context_pre_only:
+                encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if encoder_hidden_states is not None:
+            return hidden_states, encoder_hidden_states
+        else:
+            return hidden_states
+
+
+
+def generate_two_branches(
+        pipe_base,
+        pipe_modified,
+        cond: torch.Tensor,
+        uncond: torch.Tensor,
+        pooled_cond: torch.Tensor,
+        pooled_uncond: torch.Tensor,
+        cfg,
+        dim: int = 1024,
+        guidance_scale: float = 5.0,
+        seed: int = None,
+    ):
+        """Generate a batch of latents and decoded images given conditional text embeddings.
+
+        Args:
+            cond: Conditional text embeddings [1, seq, hidden].
+            uncond: Unconditional embeddings [1, seq, hidden].
+            cfg: Run configuration including batch size and diffusion steps.
+            dim: Spatial size of output image (latent is dim/8).
+            guidance_scale: CFG scale for classifier-free guidance.
+
+        Returns:
+            Tuple (latents, img_tensor) where img_tensor is decoded to [B,3,H,W].
+        """
+        assert cond.shape[0] == 1, f"TODO: If you use more than one prompt, revise cfg.bs and num_images_per_prompt param settings for correct generation. ({cond.shape[0]=} {cfg.bs=})"
+
+        #new
+        attn_map_buffer_base = []
+        ip_attn_map_buffer_base = []
+        attn_map_buffer_mod = []
+        ip_attn_map_buffer_mod = []
+        N_layers=cfg.N_layers
+        input_dim=cfg.input_dim_att_layer
+        n_heads=cfg.n_heads 
+        #
+        # duplicate text embeddings for each image to generate per prompt, using batch size as the number of prompts (even if it's 1)
+        # since sd3 doesn't
+        batch_size = 1
+        num_images_per_prompt = cfg.bs
+        _, seq_len, _ = cond.shape
+        # duplicate text embeddings for each generation per prompt, using mps friendly method
+        cond = cond.repeat(1, num_images_per_prompt, 1)
+        cond = cond.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+        pooled_cond = pooled_cond.repeat(1, num_images_per_prompt, 1)
+        pooled_cond = pooled_cond.view(batch_size * num_images_per_prompt, -1)
+        # --
+        _, seq_len, _ = uncond.shape
+        # duplicate text embeddings for each generation per prompt, using mps friendly method
+        uncond = uncond.repeat(1, num_images_per_prompt, 1)
+        uncond = uncond.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+        pooled_uncond = pooled_uncond.repeat(1, num_images_per_prompt, 1)
+        pooled_uncond = pooled_uncond.view(batch_size * num_images_per_prompt, -1)
+        # --
+
+        #new 0.0
+        #set_attn_map_capture_sd35m(pipe_base, attn_map_buffer_base, target_blocks=["transformer_blocks.0.attn.processor","transformer_blocks.23.attn.processor"])#"transformer_blocks.10.attn"])
+    
+        with torch.no_grad():
+            latents_base = run_pipe_call(
+                pipe_base,
+                prompt_embeds=cond,
+                negative_prompt_embeds=uncond,
+                pooled_prompt_embeds=pooled_cond,
+                negative_pooled_prompt_embeds=pooled_uncond,
+                num_inference_steps=cfg.diff_steps,
+                height=dim,
+                width=dim,
+                guidance_scale=guidance_scale,
+                output_type="latent",
+                generator=torch.Generator().manual_seed(seed) if seed is not None else None,
+                gen_cut_step=cfg.gen_steps,
+                num_images_per_prompt=1,
+                joint_attention_kwargs={'kwargs': {'attn_map_buffer': attn_map_buffer_base, 'ip_attn_map_buffer': ip_attn_map_buffer_base}},
+                att_blocks=cfg.att_blocks,
+            )[0]
+
+        
+        kk_base = rearrange(torch.stack(attn_map_buffer_base), '(denoising_steps layers) (b cond heads) (h w) token_len  -> b denoising_steps layers cond heads token_len h w', denoising_steps=4, b=1, layers=N_layers, cond=2, heads=n_heads, h=input_dim, w=input_dim)
+        kk_base = reduce(kk_base, 'b denoising_steps layers cond heads token_len h w -> b denoising_steps layers cond token_len h w', 'mean')
+        kk_base = reduce(kk_base, 'b denoising_steps layers cond token_len h w -> b denoising_steps cond token_len h w', 'mean')
+        kk_base= kk_base[:,:,1]
+
+        attn_map_buffer_base = []
+        attn_map_buffer_base.clear()   # empties the list in-place (best)
+        del attn_map_buffer_base 
+
+        #set_attn_map_capture_sd35m(pipe_modified, attn_map_buffer_mod, target_blocks=["transformer_blocks.0.attn.processor","transformer_blocks.23.attn.processor"])
+
+        latents_modified = run_pipe_call(
+            pipe_modified,
+            prompt_embeds=cond,
+            negative_prompt_embeds=uncond,
+            pooled_prompt_embeds=pooled_cond,
+            negative_pooled_prompt_embeds=pooled_uncond,
+            num_inference_steps=cfg.diff_steps,
+            height=dim,
+            width=dim,
+            guidance_scale=guidance_scale,
+            output_type="latent",
+            generator=torch.Generator().manual_seed(seed) if seed is not None else None,
+            gen_cut_step=cfg.gen_steps,
+            num_images_per_prompt=1,
+            joint_attention_kwargs={'kwargs': {'attn_map_buffer': attn_map_buffer_mod, 'ip_attn_map_buffer': ip_attn_map_buffer_mod}},
+            att_blocks=cfg.att_blocks,
+        )[0]
+
+        kk_mod = rearrange(torch.stack(attn_map_buffer_mod), '(denoising_steps layers) (b cond heads) (h w) token_len  -> b denoising_steps layers cond heads token_len h w', denoising_steps=4, b=1, layers=N_layers, cond=2, heads=n_heads, h=input_dim, w=input_dim)
+        kk_mod = reduce(kk_mod, 'b denoising_steps layers cond heads token_len h w -> b denoising_steps layers cond token_len h w', 'mean')
+        kk_mod = reduce(kk_mod, 'b denoising_steps layers cond token_len h w -> b denoising_steps cond token_len h w', 'mean')
+        kk_mod= kk_mod[:,:,1]
+
+        attn_map_buffer_mod = []
+        attn_map_buffer_mod.clear()   # empties the list in-place (best)
+        del attn_map_buffer_mod       # removes the local name
+
+        return latents_base, latents_modified,kk_base,kk_mod
+
+
+def run_pipe_call(
+    self,
+    prompt: Union[str, List[str]] = None,
+    prompt_2: Optional[Union[str, List[str]]] = None,
+    prompt_3: Optional[Union[str, List[str]]] = None,
+    height: Optional[int] = None,
+    width: Optional[int] = None,
+    num_inference_steps: int = 28,
+    sigmas: Optional[List[float]] = None,
+    guidance_scale: float = 7.0,
+    negative_prompt: Optional[Union[str, List[str]]] = None,
+    negative_prompt_2: Optional[Union[str, List[str]]] = None,
+    negative_prompt_3: Optional[Union[str, List[str]]] = None,
+    num_images_per_prompt: Optional[int] = 1,
+    generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+    latents: Optional[torch.FloatTensor] = None,
+    prompt_embeds: Optional[torch.FloatTensor] = None,
+    negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+    pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+    negative_pooled_prompt_embeds: Optional[torch.FloatTensor] = None,
+    ip_adapter_image: Optional[PipelineImageInput] = None,
+    ip_adapter_image_embeds: Optional[torch.Tensor] = None,
+    output_type: Optional[str] = "pil",
+    return_dict: bool = True,
+    joint_attention_kwargs: Optional[Dict[str, Any]] = None,
+    att_blocks: List[str] = None,
+    clip_skip: Optional[int] = None,
+    callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
+    callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+    max_sequence_length: int = 256,
+    skip_guidance_layers: List[int] = None,
+    skip_layer_guidance_scale: float = 2.8,
+    skip_layer_guidance_stop: float = 0.2,
+    skip_layer_guidance_start: float = 0.01,
+    mu: Optional[float] = None,
+    gen_cut_step = None,
+):
+    r"""
+    Function invoked when calling the pipeline for generation.
+
+    Args:
+        prompt (`str` or `List[str]`, *optional*):
+            The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
+            instead.
+        prompt_2 (`str` or `List[str]`, *optional*):
+            The prompt or prompts to be sent to `tokenizer_2` and `text_encoder_2`. If not defined, `prompt` is
+            will be used instead
+        prompt_3 (`str` or `List[str]`, *optional*):
+            The prompt or prompts to be sent to `tokenizer_3` and `text_encoder_3`. If not defined, `prompt` is
+            will be used instead
+        height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
+            The height in pixels of the generated image. This is set to 1024 by default for the best results.
+        width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
+            The width in pixels of the generated image. This is set to 1024 by default for the best results.
+        num_inference_steps (`int`, *optional*, defaults to 50):
+            The number of denoising steps. More denoising steps usually lead to a higher quality image at the
+            expense of slower inference.
+        sigmas (`List[float]`, *optional*):
+            Custom sigmas to use for the denoising process with schedulers which support a `sigmas` argument in
+            their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is passed
+            will be used.
+        guidance_scale (`float`, *optional*, defaults to 7.0):
+            Guidance scale as defined in [Classifier-Free Diffusion
+            Guidance](https://huggingface.co/papers/2207.12598). `guidance_scale` is defined as `w` of equation 2.
+            of [Imagen Paper](https://huggingface.co/papers/2205.11487). Guidance scale is enabled by setting
+            `guidance_scale > 1`. Higher guidance scale encourages to generate images that are closely linked to
+            the text `prompt`, usually at the expense of lower image quality.
+        negative_prompt (`str` or `List[str]`, *optional*):
+            The prompt or prompts not to guide the image generation. If not defined, one has to pass
+            `negative_prompt_embeds` instead. Ignored when not using guidance (i.e., ignored if `guidance_scale` is
+            less than `1`).
+        negative_prompt_2 (`str` or `List[str]`, *optional*):
+            The prompt or prompts not to guide the image generation to be sent to `tokenizer_2` and
+            `text_encoder_2`. If not defined, `negative_prompt` is used instead
+        negative_prompt_3 (`str` or `List[str]`, *optional*):
+            The prompt or prompts not to guide the image generation to be sent to `tokenizer_3` and
+            `text_encoder_3`. If not defined, `negative_prompt` is used instead
+        num_images_per_prompt (`int`, *optional*, defaults to 1):
+            The number of images to generate per prompt.
+        generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
+            One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+            to make generation deterministic.
+        latents (`torch.FloatTensor`, *optional*):
+            Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
+            generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
+            tensor will ge generated by sampling using the supplied random `generator`.
+        prompt_embeds (`torch.FloatTensor`, *optional*):
+            Pre-generated text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting. If not
+            provided, text embeddings will be generated from `prompt` input argument.
+        negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+            Pre-generated negative text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
+            weighting. If not provided, negative_prompt_embeds will be generated from `negative_prompt` input
+            argument.
+        pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            Pre-generated pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt weighting.
+            If not provided, pooled text embeddings will be generated from `prompt` input argument.
+        negative_pooled_prompt_embeds (`torch.FloatTensor`, *optional*):
+            Pre-generated negative pooled text embeddings. Can be used to easily tweak text inputs, *e.g.* prompt
+            weighting. If not provided, pooled negative_prompt_embeds will be generated from `negative_prompt`
+            input argument.
+        ip_adapter_image (`PipelineImageInput`, *optional*):
+            Optional image input to work with IP Adapters.
+        ip_adapter_image_embeds (`torch.Tensor`, *optional*):
+            Pre-generated image embeddings for IP-Adapter. Should be a tensor of shape `(batch_size, num_images,
+            emb_dim)`. It should contain the negative image embedding if `do_classifier_free_guidance` is set to
+            `True`. If not provided, embeddings are computed from the `ip_adapter_image` input argument.
+        output_type (`str`, *optional*, defaults to `"pil"`):
+            The output format of the generate image. Choose between
+            [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
+        return_dict (`bool`, *optional*, defaults to `True`):
+            Whether or not to return a [`~pipelines.stable_diffusion_3.StableDiffusion3PipelineOutput`] instead of
+            a plain tuple.
+        joint_attention_kwargs (`dict`, *optional*):
+            A kwargs dictionary that if specified is passed along to the `AttentionProcessor` as defined under
+            `self.processor` in
+            [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
+        callback_on_step_end (`Callable`, *optional*):
+            A function that calls at the end of each denoising steps during the inference. The function is called
+            with the following arguments: `callback_on_step_end(self: DiffusionPipeline, step: int, timestep: int,
+            callback_kwargs: Dict)`. `callback_kwargs` will include a list of all tensors as specified by
+            `callback_on_step_end_tensor_inputs`.
+        callback_on_step_end_tensor_inputs (`List`, *optional*):
+            The list of tensor inputs for the `callback_on_step_end` function. The tensors specified in the list
+            will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
+            `._callback_tensor_inputs` attribute of your pipeline class.
+        max_sequence_length (`int` defaults to 256): Maximum sequence length to use with the `prompt`.
+        skip_guidance_layers (`List[int]`, *optional*):
+            A list of integers that specify layers to skip during guidance. If not provided, all layers will be
+            used for guidance. If provided, the guidance will only be applied to the layers specified in the list.
+            Recommended value by StabiltyAI for Stable Diffusion 3.5 Medium is [7, 8, 9].
+        skip_layer_guidance_scale (`int`, *optional*): The scale of the guidance for the layers specified in
+            `skip_guidance_layers`. The guidance will be applied to the layers specified in `skip_guidance_layers`
+            with a scale of `skip_layer_guidance_scale`. The guidance will be applied to the rest of the layers
+            with a scale of `1`.
+        skip_layer_guidance_stop (`int`, *optional*): The step at which the guidance for the layers specified in
+            `skip_guidance_layers` will stop. The guidance will be applied to the layers specified in
+            `skip_guidance_layers` until the fraction specified in `skip_layer_guidance_stop`. Recommended value by
+            StabiltyAI for Stable Diffusion 3.5 Medium is 0.2.
+        skip_layer_guidance_start (`int`, *optional*): The step at which the guidance for the layers specified in
+            `skip_guidance_layers` will start. The guidance will be applied to the layers specified in
+            `skip_guidance_layers` from the fraction specified in `skip_layer_guidance_start`. Recommended value by
+            StabiltyAI for Stable Diffusion 3.5 Medium is 0.01.
+        mu (`float`, *optional*): `mu` value used for `dynamic_shifting`.
+
+    Examples:
+
+    Returns:
+        [`~pipelines.stable_diffusion_3.StableDiffusion3PipelineOutput`] or `tuple`:
+        [`~pipelines.stable_diffusion_3.StableDiffusion3PipelineOutput`] if `return_dict` is True, otherwise a
+        `tuple`. When returning a tuple, the first element is a list with the generated images.
+    """
+    def init_ipadapter(self, target_blocks=["block"]):
+        from transformers import SiglipVisionModel, SiglipImageProcessor
+        #state_dict = torch.load(ip_adapter_path, map_location="cpu")
+
+        device, dtype = self.transformer.device, self.transformer.dtype
+
+
+        attn_procs = {}
+        transformer = self.transformer
+
+        for idx_name, name in enumerate(transformer.attn_processors.keys()):
+            hidden_size = transformer.config.attention_head_dim * transformer.config.num_attention_heads
+            ip_hidden_states_dim = transformer.config.attention_head_dim * transformer.config.num_attention_heads
+            ip_encoder_hidden_states_dim = transformer.config.caption_projection_dim
+
+            if any([t in name for t in target_blocks]):
+                print('selected layer', name)
+                attn_procs[name] = JointIPAttnProcessor(
+                    hidden_size=hidden_size,
+                    cross_attention_dim=transformer.config.caption_projection_dim,
+                    ip_hidden_states_dim=ip_hidden_states_dim,
+                    ip_encoder_hidden_states_dim=ip_encoder_hidden_states_dim,
+                    head_dim=transformer.config.attention_head_dim,
+                    timesteps_emb_dim=1280,
+                ).to(device, dtype=dtype)
+            else:
+                attn_procs[name] = JointAttnProcessor()
+
+        self.transformer.set_attn_processor(attn_procs)
+        #tmp_ip_layers = torch.nn.ModuleList(self.transformer.attn_processors.values())
+#
+        #key_name = tmp_ip_layers.load_state_dict(state_dict["ip_adapter"], strict=False)
+        #print(f"=> loading ip_adapter: {key_name}")
+    
+
+    height = height or self.default_sample_size * self.vae_scale_factor
+    width = width or self.default_sample_size * self.vae_scale_factor
+
+    if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
+        callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
+
+    #0.0
+    init_ipadapter(self, target_blocks=att_blocks)#['.attn.'])#
+    
+    # 1. Check inputs. Raise error if not correct
+    self.check_inputs(
+        prompt,
+        prompt_2,
+        prompt_3,
+        height,
+        width,
+        negative_prompt=negative_prompt,
+        negative_prompt_2=negative_prompt_2,
+        negative_prompt_3=negative_prompt_3,
+        prompt_embeds=prompt_embeds,
+        negative_prompt_embeds=negative_prompt_embeds,
+        pooled_prompt_embeds=pooled_prompt_embeds,
+        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+        callback_on_step_end_tensor_inputs=callback_on_step_end_tensor_inputs,
+        max_sequence_length=max_sequence_length,
+    )
+
+    self._guidance_scale = guidance_scale
+    self._skip_layer_guidance_scale = skip_layer_guidance_scale
+    self._clip_skip = clip_skip
+    self._joint_attention_kwargs = joint_attention_kwargs
+    self._interrupt = False
+
+    # 2. Define call parameters
+    if prompt is not None and isinstance(prompt, str):
+        batch_size = 1
+    elif prompt is not None and isinstance(prompt, list):
+        batch_size = len(prompt)
+    else:
+        batch_size = prompt_embeds.shape[0]
+
+    device = self._execution_device
+
+    lora_scale = (
+        self.joint_attention_kwargs.get("scale", None) if self.joint_attention_kwargs is not None else None
+    )
+    (
+        prompt_embeds,
+        negative_prompt_embeds,
+        pooled_prompt_embeds,
+        negative_pooled_prompt_embeds,
+    ) = self.encode_prompt(
+        prompt=prompt,
+        prompt_2=prompt_2,
+        prompt_3=prompt_3,
+        negative_prompt=negative_prompt,
+        negative_prompt_2=negative_prompt_2,
+        negative_prompt_3=negative_prompt_3,
+        do_classifier_free_guidance=self.do_classifier_free_guidance,
+        prompt_embeds=prompt_embeds,
+        negative_prompt_embeds=negative_prompt_embeds,
+        pooled_prompt_embeds=pooled_prompt_embeds,
+        negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+        device=device,
+        clip_skip=self.clip_skip,
+        num_images_per_prompt=num_images_per_prompt,
+        max_sequence_length=max_sequence_length,
+        lora_scale=lora_scale,
+    )
+
+    if self.do_classifier_free_guidance:
+        if skip_guidance_layers is not None:
+            original_prompt_embeds = prompt_embeds
+            original_pooled_prompt_embeds = pooled_prompt_embeds
+        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+
+    # 4. Prepare latent variables
+    num_channels_latents = self.transformer.config.in_channels
+    latents = self.prepare_latents(
+        batch_size * num_images_per_prompt,
+        num_channels_latents,
+        height,
+        width,
+        prompt_embeds.dtype,
+        device,
+        generator,
+        latents,
+    )
+
+    # 5. Prepare timesteps
+    scheduler_kwargs = {}
+    if self.scheduler.config.get("use_dynamic_shifting", None) and mu is None:
+        _, _, height, width = latents.shape
+        image_seq_len = (height // self.transformer.config.patch_size) * (
+            width // self.transformer.config.patch_size
+        )
+        mu = calculate_shift(
+            image_seq_len,
+            self.scheduler.config.get("base_image_seq_len", 256),
+            self.scheduler.config.get("max_image_seq_len", 4096),
+            self.scheduler.config.get("base_shift", 0.5),
+            self.scheduler.config.get("max_shift", 1.16),
+        )
+        scheduler_kwargs["mu"] = mu
+    elif mu is not None:
+        scheduler_kwargs["mu"] = mu
+    timesteps, num_inference_steps = retrieve_timesteps(
+        self.scheduler,
+        num_inference_steps,
+        device,
+        sigmas=sigmas,
+        **scheduler_kwargs,
+    )
+    num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+    self._num_timesteps = len(timesteps)
+
+    # 6. Prepare image embeddings
+    if (ip_adapter_image is not None and self.is_ip_adapter_active) or ip_adapter_image_embeds is not None:
+        ip_adapter_image_embeds = self.prepare_ip_adapter_image_embeds(
+            ip_adapter_image,
+            ip_adapter_image_embeds,
+            device,
+            batch_size * num_images_per_prompt,
+            self.do_classifier_free_guidance,
+        )
+
+        if self.joint_attention_kwargs is None:
+            self._joint_attention_kwargs = {"ip_adapter_image_embeds": ip_adapter_image_embeds}
+        else:
+            self._joint_attention_kwargs.update(ip_adapter_image_embeds=ip_adapter_image_embeds)
+
+    # 7. Denoising loop
+    with self.progress_bar(total=num_inference_steps) as progress_bar:
+        for i, t in enumerate(timesteps):
+            if self.interrupt:
+                continue
+
+            # expand the latents if we are doing classifier free guidance
+            latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+            # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
+            timestep = t.expand(latent_model_input.shape[0])
+
+            noise_pred = self.transformer(
+                hidden_states=latent_model_input,
+                timestep=timestep,
+                encoder_hidden_states=prompt_embeds,
+                pooled_projections=pooled_prompt_embeds,
+                joint_attention_kwargs=self.joint_attention_kwargs,
+                return_dict=False,
+            )[0]
+
+            # perform guidance
+            if self.do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+                should_skip_layers = (
+                    True
+                    if i > num_inference_steps * skip_layer_guidance_start
+                    and i < num_inference_steps * skip_layer_guidance_stop
+                    else False
+                )
+                if skip_guidance_layers is not None and should_skip_layers:
+                    timestep = t.expand(latents.shape[0])
+                    latent_model_input = latents
+                    noise_pred_skip_layers = self.transformer(
+                        hidden_states=latent_model_input,
+                        timestep=timestep,
+                        encoder_hidden_states=original_prompt_embeds,
+                        pooled_projections=original_pooled_prompt_embeds,
+                        joint_attention_kwargs=self.joint_attention_kwargs,
+                        return_dict=False,
+                        skip_layers=skip_guidance_layers,
+                    )[0]
+                    noise_pred = (
+                        noise_pred + (noise_pred_text - noise_pred_skip_layers) * self._skip_layer_guidance_scale
+                    )
+
+            # compute the previous noisy sample x_t -> x_t-1
+            latents_dtype = latents.dtype
+            latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+
+            if latents.dtype != latents_dtype:
+                if torch.backends.mps.is_available():
+                    # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                    latents = latents.to(latents_dtype)
+
+            if callback_on_step_end is not None:
+                callback_kwargs = {}
+                for k in callback_on_step_end_tensor_inputs:
+                    callback_kwargs[k] = locals()[k]
+                callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                latents = callback_outputs.pop("latents", latents)
+                prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                pooled_prompt_embeds = callback_outputs.pop("pooled_prompt_embeds", pooled_prompt_embeds)
+
+            # call the callback, if provided
+            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                progress_bar.update()
+
+            if XLA_AVAILABLE:
+                xm.mark_step()
+
+            if gen_cut_step is not None and (i + 1) >= gen_cut_step:
+                break
+
+    if output_type == "latent":
+        image = latents
+
+    else:
+        latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+
+        image = self.vae.decode(latents, return_dict=False)[0]
+        image = self.image_processor.postprocess(image, output_type=output_type)
+
+    # Offload all models
+    self.maybe_free_model_hooks()
+
+    if not return_dict:
+        return (image,)
+
+    return StableDiffusion3PipelineOutput(images=image)
