@@ -97,7 +97,7 @@ collects **N distinct high-drift words**.
 | Argument                   | Default          | Description |
 |----------------------------|------------------|-------------|
 | `--method`                 | `db15`           | Unlearning: `ac`, `spm`, `sh`; Customization: `db15`, `db21` |
-| `--prompt`                 | `A picture of a` | Template prompt; DriftScope optimizes the masked concept token |
+| `--prompt`                 | `A picture of a` | Template prompt |
 
 `run_sd35.py` (v2) follows the same structure for SD 3.5-Medium.
 
