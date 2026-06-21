@@ -90,7 +90,7 @@ python run_sd35.py --prompt "A photo of a" --out_subfolder sd35m
 ```
 
 `run_several.py` / `run_sd35.py` call `find_unique_masks()`, which repeats the optimization until it
-collects **N distinct high-drift words** (capped at 2×N attempts) and writes them to the output folder.
+collects **N distinct high-drift words**.
 
 **v1 `run_several.py` arguments:**
 
