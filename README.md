@@ -31,19 +31,19 @@ The code is split into two versions by base-model architecture:
 ```
 DriftScope/
 ├── v1/                         # SD 1.4 / 1.5 / 2.1
-│   ├── dexter/                 # core package (config, optimization, pipelines, models)
-│   ├── notebooks/              # setup.ipynb, run.ipynb, viz.ipynb
+│   ├── dexter/                 
+│   ├── notebooks/              
 │   ├── checkpoints/            # (created by setup) precomputed translation matrices
 │   ├── outputs/                # drift reports written here
-│   ├── run_several.py          # parametrized runner
+│   ├── run_several.py          # runner
 │   └── run_several.sh          # launch script
 ├── v2/                         # SD 3.5-Medium
-│   ├── dexter/                 # core package (incl. dexter_sd3.py for MMDiT attention)
-│   ├── notebooks/              # setup.ipynb, run.ipynb, run_sd35.ipynb, viz.ipynb, plot.ipynb
+│   ├── dexter/                 
+│   ├── notebooks/              
 │   ├── requirements.txt
-│   ├── run_sd35.py             # parametrized runner
+│   ├── run_sd35.py             # runner
 │   └── run_sd35m.sh            # launch script
-└── diffusion_modified_models/  # adapted checkpoints to audit (you provide — see below)
+└── diffusion_modified_models/  # adapted checkpoints to audit
 ```
 
 
