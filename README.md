@@ -75,14 +75,6 @@ DriftScope compares a base model against an **adapted** model that you want to a
 checkpoints under `diffusion_modified_models/` (this folder ships empty) and update the
 `cfg.modified_model` path in the runner for your method.
 
-The checkpoints used in the paper come from:
-- **Unlearning** (AC, SPM, Scissorhands): the [AdvUnlearn](https://github.com/OPTML-Group/AdvUnlearn) checkpoints.
-- **Customization** (DreamBooth, etc.): models fine-tuned on
-  [CustomConcept101](https://github.com/adobe-research/custom-diffusion) / the DreamBooth dog images.
-
-> Checkpoints load either as full UNet `weights` or as `lora` adapters, controlled by
-> `cfg.load_type` in the runner.
-
 ## Running DriftScope
 
 ### A) Systematic runs
