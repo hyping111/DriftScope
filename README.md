@@ -13,15 +13,7 @@
 
 ## Abstract
 
-Adapting a pre-trained diffusion model is routinely evaluated only on its *intended* effect.
-We show that weight-level adaptation systematically damages semantically **unrelated** concepts
-in ways that aggregate metrics (FID, KID) structurally cannot surface: when damage is severe
-enough for FID/KID to respond, the model is already nearly unusable; when the model remains
-functional, these metrics stay flat while specific concepts silently degrade. To expose this
-hidden drift before deployment, we introduce **DriftScope**, which takes any two checkpoints — a
-base model and an adapted variant — and returns a ranked list of tokens whose visual concepts have
-drifted most between them, without requiring real data or access to model internals beyond standard
-attention outputs.
+Adapting pre-trained text-to-image diffusion models, whether to learn new visual concepts or erase unwanted ones, is routinely evaluated on its intended effects alone. We argue this framing is incomplete. Through sparse autoencoder analysis and zero-shot classification, we demonstrate that adaptation systematically damages semantically unrelated concepts in ways that aggregate metrics structurally cannot surface: when damage is severe enough for FID and KID to respond, the model is already nearly unusable; when the model remains functional, FID and KID stay flat while specific classes silently suffer worst-case zero-shot accuracy drops of up to 18.9 points and concept-level distributions shift dramatically. This pattern appears at both ends of the adaptation spectrum (concept customization and concept unlearning), suggesting it is a systematic consequence of weight-level modification rather than an artifact of any particular method. To surface this hidden drift before deployment, we introduce DriftScope, a prompt-level diagnostic tool that takes any two model checkpoints and returns a ranked list of tokens whose visual concepts have shifted most between them. DriftScope optimizes a soft prompt to attribute drift at the token level without requiring access to real data or model internals. The result is an interpretable, concept-level audit that aggregate evaluation cannot provide.
 
 ## Results
 
