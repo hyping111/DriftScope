@@ -26,7 +26,7 @@ The code is split into two versions by base-model architecture:
 | Version | Architectures |
 |---------|--------------------------------|
 | `v1/`   | SD 1.4, SD 1.5, SD 2.1         |
-| `v2/`   | SD 3.5-Medium (+ SDXL notebooks) |
+| `v2/`   | SD 3.5-Medium |
 
 ```
 DriftScope/
