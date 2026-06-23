@@ -2,7 +2,7 @@
 
 > Accepted at European Conference on Computer Vision 2026 🎉
 
-[Héctor Laria](https://orcid.org/0009-0008-6253-4709)<sup>*1,2</sup>, [Yiping Han](https://orcid.org/0009-0007-2589-576X)<sup>*1,2</sup>, [Julian D. Santamaria](https://orcid.org/0009-0007-7287-5761)<sup>1,2</sup>, [Kai Wang](https://orcid.org/0000-0002-9605-8279)<sup>3,4</sup>, [Bogdan Raducanu](https://orcid.org/0000-0003-3648-8020)<sup>1,2</sup>, [Joost van de Weijer](https://orcid.org/0000-0002-9656-9706)<sup>1,2</sup>, [Alexandra Gomez-Villa](https://orcid.org/0000-0003-0469-3425)<sup>1,2</sup>
+[Héctor Laria](https://hecoding.github.io/)<sup>*1,2</sup>, [Yiping Han](https://orcid.org/0009-0007-2589-576X)<sup>*1,2</sup>, [Julian D. Santamaria](https://julian075.github.io/)<sup>1,2</sup>, [Kai Wang](https://wangkai930418.github.io/)<sup>3,4</sup>, [Bogdan Raducanu](https://scholar.google.com/citations?user=zdIW07oAAAAJ)<sup>1,2</sup>, [Joost van de Weijer](https://scholar.google.com/citations?user=Gsw2iUEAAAAJ)<sup>1,2</sup>, [Alexandra Gomez-Villa](https://sites.google.com/view/alex-gomez-villa)<sup>1,2</sup>
 
 <sup>1</sup> Computer Vision Center (CVC), Barcelona, Spain &nbsp; <sup>2</sup> Universitat Autònoma de Barcelona, Barcelona, Spain
 <sup>3</sup> City University of Hong Kong (Dongguan), China &nbsp; <sup>4</sup> City University of Hong Kong, China
