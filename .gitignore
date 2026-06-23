@@ -12,3 +12,4 @@ v2/outputs/*
 !**/.gitkeep
 .ipynb_checkpoints/
 .DS_Store
+figures/
