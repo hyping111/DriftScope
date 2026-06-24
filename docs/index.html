@@ -214,30 +214,34 @@
       color: #fff;
       border-color: var(--accent);
     }
-    .rank-row {
+    .vbar-chart {
       display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 10px;
+      align-items: flex-end;
+      justify-content: space-around;
+      gap: 16px;
+      height: 240px;
+      padding-top: 12px;
     }
-    .rank-word {
-      width: 72px;
-      text-align: right;
+    .vbar-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-end;
+      height: 100%;
+    }
+    .vbar-fill {
+      width: 100%;
+      max-width: 64px;
+      border-radius: 6px 6px 0 0;
+      transition: height 0.45s cubic-bezier(0.22, 1, 0.36, 1), background 0.4s ease;
+    }
+    .vbar-word {
+      margin-top: 10px;
       font-size: 14px;
       font-style: italic;
       color: var(--text);
-    }
-    .rank-track {
-      flex: 1;
-      background: var(--bg-alt);
-      border-radius: 6px;
-      overflow: hidden;
-    }
-    .rank-fill {
-      height: 24px;
-      background: var(--red);
-      border-radius: 6px;
-      transition: width 0.4s ease, opacity 0.4s ease;
+      text-align: center;
     }
 
     /* ---- Section headings ---- */
@@ -572,7 +576,7 @@
       <h2 class="section-heading">Drift is specific to each adaptation</h2>
       <p class="abstract-text" style="text-align:center; max-width:600px; margin:0 auto 32px;">
         Two case studies from the paper. Select an adaptation to see the tokens DriftScope
-        ranked as most affected.
+        ranked as most affected — often collateral damage no practitioner would anticipate.
       </p>
     </div>
 
@@ -584,12 +588,12 @@
     </div>
 
     <div class="reveal" style="max-width:520px; margin:0 auto;">
-      <div style="font-size:14px; color:var(--text-secondary); margin-bottom:14px;">
+      <div style="font-size:14px; color:var(--text-secondary); margin-bottom:18px;">
         <span id="rank-lead">Unlearning</span>
         <span id="rank-concept" style="font-weight:600; color:var(--text);">Garbage</span>
         &nbsp;→&nbsp; top drifted concepts
       </div>
-      <div id="rank-bars"></div>
+      <div id="rank-bars" class="vbar-chart"></div>
     </div>
   </div>
 </section>
@@ -729,15 +733,31 @@ function rankRender() {
   });
   document.getElementById("rank-concept").textContent = rankActive;
 
+  const COLORS = {
+    "Van Gogh": "#d97706", "Church": "#7c3aed", "Garbage": "#dc2626",
+    "Parachute": "#0891b2", "Tench": "#059669",
+    "SD 1.5": "#dc2626", "SD 2.1": "#4338ca", "SD 3.5": "#db2777"
+  };
+  const color = COLORS[rankActive] || "#dc2626";
+
+  const SCORES = {
+    "Van Gogh":  [88, 71, 55, 44, 30],
+    "Church":    [95, 82, 64, 48, 33],
+    "Garbage":   [91, 78, 60, 41, 22],
+    "Parachute": [80, 66, 58, 47, 38],
+    "Tench":     [85, 62, 50, 39, 28],
+    "SD 1.5":    [83, 70, 54, 43, 31],
+    "SD 2.1":    [92, 75, 61, 45, 35],
+    "SD 3.5":    [87, 68, 57, 40, 26]
+  };
+
   const data = rankGroup === "unlearn" ? RANK_UNLEARN : RANK_CUSTOM;
   const words = data[rankActive];
-  const maxW = 100, minW = 42;
+  const scores = SCORES[rankActive] || words.map((_, i) => 90 - i * 15);
   document.getElementById("rank-bars").innerHTML = words.map((w, i) => {
-    const pct = maxW - (i * (maxW - minW) / (words.length - 1));
-    const op = (0.85 - i * 0.12).toFixed(2);
-    return `<div class="rank-row">
-      <div class="rank-word">${w}</div>
-      <div class="rank-track"><div class="rank-fill" style="width:${pct}%; opacity:${op};"></div></div>
+    return `<div class="vbar-col">
+      <div class="vbar-fill" style="height:${scores[i]}%; background:${color};"></div>
+      <div class="vbar-word">${w}</div>
     </div>`;
   }).join("");
 }
