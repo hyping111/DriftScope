@@ -104,7 +104,9 @@
       color: var(--accent);
       border-bottom-color: var(--accent);
     }
-    .equal { font-size: 0.7rem; vertical-align: super; color: var(--accent-light); }
+    .authors .aff { font-size: 0.68rem; color: var(--accent); font-weight: 600; margin-left: 1px; line-height: 0; }
+    .equal-note { font-size: 0.78rem; margin-top: 2px; }
+    .equal-note sup { color: var(--accent); }
 
     .affiliations {
       font-size: 0.85rem;
@@ -441,13 +443,13 @@
     <h1>DriftScope: Measuring The Hidden Effects of Diffusion Model Adaptation</h1>
 
     <div class="authors">
-      <a href="https://hecoding.github.io/">Héctor Laria</a><span class="equal">*</span>,
-      <a href="https://orcid.org/0009-0007-2589-576X">Yiping Han</a><span class="equal">*</span>,
-      <a href="https://julian075.github.io/">Julian D. Santamaria</a>,
-      <a href="https://wangkai930418.github.io/">Kai Wang</a>,
-      <a href="https://scholar.google.com/citations?user=zdIW07oAAAAJ">Bogdan Raducanu</a>,
-      <a href="https://scholar.google.com/citations?user=Gsw2iUEAAAAJ">Joost van de Weijer</a>,
-      <a href="https://sites.google.com/view/alex-gomez-villa">Alexandra Gomez-Villa</a>
+      <a href="https://hecoding.github.io/">Héctor Laria</a><sup class="aff">*1,2</sup>,
+      <a href="https://orcid.org/0009-0007-2589-576X">Yiping Han</a><sup class="aff">*1,2</sup>,
+      <a href="https://julian075.github.io/">Julian D. Santamaria</a><sup class="aff">1,2</sup>,
+      <a href="https://wangkai930418.github.io/">Kai Wang</a><sup class="aff">3,4</sup>,
+      <a href="https://scholar.google.com/citations?user=zdIW07oAAAAJ">Bogdan Raducanu</a><sup class="aff">1,2</sup>,
+      <a href="https://scholar.google.com/citations?user=Gsw2iUEAAAAJ">Joost van de Weijer</a><sup class="aff">1,2</sup>,
+      <a href="https://sites.google.com/view/alex-gomez-villa">Alexandra Gomez-Villa</a><sup class="aff">1,2</sup>
     </div>
 
     <div class="affiliations">
@@ -455,11 +457,12 @@
       <sup>2</sup>Universitat Autònoma de Barcelona &nbsp;
       <sup>3</sup>City University of Hong Kong (Dongguan) &nbsp;
       <sup>4</sup>City University of Hong Kong
+      <div class="equal-note"><sup>*</sup>Equal contribution</div>
     </div>
 
     <div class="links">
-      <a class="link-pill" href="#"><i class="ai ai-arxiv"></i> arXiv</a>
-      <a class="link-pill" href="#"><i class="fas fa-file-pdf"></i> Paper</a>
+      <a class="link-pill" href="https://arxiv.org/abs/2607.00183"><i class="ai ai-arxiv"></i> arXiv</a>
+      <a class="link-pill" href="https://eccv.ecva.net/virtual/2026/poster/3510"><i class="fas fa-file-pdf"></i> Paper</a>
       <a class="link-pill" href="https://github.com/hyping111/DriftScope"><i class="fab fa-github"></i> Code</a>
     </div>
   </div>
@@ -665,7 +668,7 @@
         <div class="bibtex-code" id="bibtex">@article{laria2026driftscope,
   title={DriftScope: Measuring The Hidden Effects of Diffusion Model Adaptation},
   author={Laria, H{\'e}ctor and Han, Yiping and Santamaria, Julian D. and Wang, Kai and Raducanu, Bogdan and Van De Weijer, Joost and Gomez-Villa, Alexandra},
-  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  journal={arXiv preprint arXiv:2607.00183},
   year={2026}
 }</div>
       </div>
