@@ -106,11 +106,13 @@ collects **N distinct high-drift words**.
 If you find this work useful, please cite:
 
 ```bibtex
-@article{laria2026driftscope,
+@inproceedings{laria2026driftscope,
   title={DriftScope: Measuring The Hidden Effects of Diffusion Model Adaptation},
   author={Laria, H{\'e}ctor and Han, Yiping and Santamaria, Julian D. and Wang, Kai and Raducanu, Bogdan and Van De Weijer, Joost and Gomez-Villa, Alexandra},
-  journal={arXiv preprint arXiv:2607.00183},
-  year={2026}
+  booktitle={European Conference on Computer Vision (ECCV)},
+  year={2026},
+  eprint={2607.00183},
+  archivePrefix={arXiv}
 }
 ```
 
