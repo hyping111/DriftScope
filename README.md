@@ -7,7 +7,7 @@
 <sup>1</sup> Computer Vision Center (CVC), Barcelona, Spain &nbsp; <sup>2</sup> Universitat Autònoma de Barcelona, Barcelona, Spain
 <sup>3</sup> City University of Hong Kong (Dongguan), China &nbsp; <sup>4</sup> City University of Hong Kong, China
 
-[![Paper](https://img.shields.io/badge/Paper-blue)](https://eccv.ecva.net/virtual/2026/poster/3510) [![arXiv](https://img.shields.io/badge/arXiv-b31b1b)](https://arxiv.org/abs/2607.00183)
+[![Project Page](https://img.shields.io/badge/Project-Page-green)](https://hyping111.github.io/DriftScope/) [![Paper](https://img.shields.io/badge/Paper-blue)](https://eccv.ecva.net/virtual/2026/poster/3510) [![arXiv](https://img.shields.io/badge/arXiv-b31b1b)](https://arxiv.org/abs/2607.00183)
 
 <img src="img/method.png" alt="DriftScope method overview" width="100%">
 
